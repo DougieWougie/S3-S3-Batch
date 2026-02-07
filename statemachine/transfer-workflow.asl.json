@@ -1,0 +1,211 @@
+{
+  "Comment": "S3-to-S3 Cross-Account Batch Transfer Workflow",
+  "StartAt": "ListObjects",
+  "States": {
+    "ListObjects": {
+      "Type": "Task",
+      "Resource": "${ListObjectsFunctionArn}",
+      "Parameters": {
+        "execution_id.$": "$$.Execution.Name",
+        "source_prefix.$": "$.source_prefix"
+      },
+      "ResultPath": "$.list_result",
+      "Retry": [
+        {
+          "ErrorEquals": ["RetryableError"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "TransferFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "CheckObjectCount"
+    },
+    "CheckObjectCount": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.list_result.total_objects",
+          "NumericEquals": 0,
+          "Next": "NoObjectsToTransfer"
+        }
+      ],
+      "Default": "TransferObjects"
+    },
+    "NoObjectsToTransfer": {
+      "Type": "Pass",
+      "Result": {
+        "status": "SKIPPED",
+        "message": "No objects found to transfer"
+      },
+      "ResultPath": "$.transfer_result",
+      "Next": "GenerateReport"
+    },
+    "TransferObjects": {
+      "Type": "Map",
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "STANDARD"
+        },
+        "StartAt": "TransferSingleObject",
+        "States": {
+          "TransferSingleObject": {
+            "Type": "Task",
+            "Resource": "${TransferObjectFunctionArn}",
+            "Retry": [
+              {
+                "ErrorEquals": ["RetryableError"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 8,
+                "BackoffRate": 2.5,
+                "JitterStrategy": "FULL"
+              },
+              {
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "Next": "RecordTransferFailure",
+                "ResultPath": "$.error"
+              }
+            ],
+            "End": true
+          },
+          "RecordTransferFailure": {
+            "Type": "Pass",
+            "Parameters": {
+              "status": "FAILED",
+              "key.$": "$.Key",
+              "error.$": "$.error"
+            },
+            "End": true
+          }
+        }
+      },
+      "ItemReader": {
+        "Resource": "arn:aws:states:::s3:getObject",
+        "ReaderConfig": {
+          "InputType": "JSON",
+          "MaxItems": 10000000
+        },
+        "Parameters": {
+          "Bucket.$": "$.list_result.manifest_bucket",
+          "Key.$": "$.list_result.manifest_key"
+        }
+      },
+      "ItemSelector": {
+        "Key.$": "$$.Map.Item.Value.Key",
+        "Size.$": "$$.Map.Item.Value.Size",
+        "ETag.$": "$$.Map.Item.Value.ETag",
+        "source_bucket.$": "$.list_result.source_bucket",
+        "destination_bucket.$": "$.list_result.destination_bucket",
+        "source_prefix.$": "$.list_result.source_prefix",
+        "destination_prefix.$": "$.list_result.destination_prefix",
+        "execution_id.$": "$.list_result.execution_id"
+      },
+      "ItemBatcher": {
+        "MaxItemsPerBatch": 1
+      },
+      "MaxConcurrency": 40,
+      "Label": "TransferObjects",
+      "ResultPath": "$.transfer_result",
+      "Next": "ValidateTransfer"
+    },
+    "ValidateTransfer": {
+      "Type": "Task",
+      "Resource": "${ValidateTransferFunctionArn}",
+      "Parameters": {
+        "manifest_bucket.$": "$.list_result.manifest_bucket",
+        "manifest_key.$": "$.list_result.manifest_key",
+        "total_objects.$": "$.list_result.total_objects",
+        "execution_id.$": "$.list_result.execution_id",
+        "destination_bucket.$": "$.list_result.destination_bucket",
+        "destination_prefix.$": "$.list_result.destination_prefix"
+      },
+      "ResultPath": "$.validation",
+      "Retry": [
+        {
+          "ErrorEquals": ["RetryableError"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["ValidationError"],
+          "Next": "GenerateReport",
+          "ResultPath": "$.validation"
+        },
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "TransferFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "GenerateReport"
+    },
+    "GenerateReport": {
+      "Type": "Task",
+      "Resource": "${GenerateReportFunctionArn}",
+      "Parameters": {
+        "execution_id.$": "$.list_result.execution_id",
+        "manifest_bucket.$": "$.list_result.manifest_bucket",
+        "manifest_key.$": "$.list_result.manifest_key",
+        "total_objects.$": "$.list_result.total_objects",
+        "total_size_bytes.$": "$.list_result.total_size_bytes",
+        "source_bucket.$": "$.list_result.source_bucket",
+        "destination_bucket.$": "$.list_result.destination_bucket",
+        "validation.$": "$.validation"
+      },
+      "ResultPath": "$.report",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "TransferComplete"
+    },
+    "TransferComplete": {
+      "Type": "Succeed"
+    },
+    "TransferFailed": {
+      "Type": "Fail",
+      "Error": "TransferFailed",
+      "Cause": "S3-to-S3 transfer workflow failed. Check execution history for details."
+    }
+  }
+}

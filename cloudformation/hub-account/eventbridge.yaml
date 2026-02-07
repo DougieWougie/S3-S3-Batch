@@ -1,0 +1,87 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  EventBridge rules for S3-to-S3 transfer triggers.
+  Supports scheduled (cron) and S3 event triggers.
+
+Parameters:
+  StateMachineArn:
+    Type: String
+    Description: ARN of the Step Functions state machine
+  EventBridgeRoleArn:
+    Type: String
+    Description: ARN of the EventBridge IAM role
+  EnableSchedule:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enable scheduled transfer trigger
+  ScheduleExpression:
+    Type: String
+    Default: 'rate(1 day)'
+    Description: EventBridge schedule expression (cron or rate)
+  SourcePrefix:
+    Type: String
+    Default: ''
+    Description: Source prefix to include in the scheduled trigger input
+  EnableS3EventTrigger:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enable S3 event-based trigger (requires S3 EventBridge notifications enabled)
+  SourceBucketName:
+    Type: String
+    Default: ''
+    Description: Source bucket name for S3 event trigger
+
+Conditions:
+  ScheduleEnabled: !Equals [!Ref EnableSchedule, 'true']
+  S3EventEnabled: !Equals [!Ref EnableS3EventTrigger, 'true']
+
+Resources:
+  # Scheduled transfer rule
+  ScheduledTransferRule:
+    Type: AWS::Events::Rule
+    Condition: ScheduleEnabled
+    Properties:
+      Name: !Sub '${AWS::StackName}-ScheduledTransfer'
+      Description: Scheduled S3-to-S3 transfer trigger
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Id: TransferStateMachine
+          Arn: !Ref StateMachineArn
+          RoleArn: !Ref EventBridgeRoleArn
+          Input: !Sub '{"source_prefix": "${SourcePrefix}"}'
+
+  # S3 event trigger rule (requires S3 EventBridge notifications enabled on source bucket)
+  S3EventTransferRule:
+    Type: AWS::Events::Rule
+    Condition: S3EventEnabled
+    Properties:
+      Name: !Sub '${AWS::StackName}-S3EventTransfer'
+      Description: S3 event-based transfer trigger
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Ref SourceBucketName
+      Targets:
+        - Id: TransferStateMachine
+          Arn: !Ref StateMachineArn
+          RoleArn: !Ref EventBridgeRoleArn
+          Input: !Sub '{"source_prefix": "${SourcePrefix}", "trigger": "s3_event"}'
+
+Outputs:
+  ScheduledRuleArn:
+    Condition: ScheduleEnabled
+    Description: Scheduled transfer EventBridge rule ARN
+    Value: !GetAtt ScheduledTransferRule.Arn
+  S3EventRuleArn:
+    Condition: S3EventEnabled
+    Description: S3 event transfer EventBridge rule ARN
+    Value: !GetAtt S3EventTransferRule.Arn

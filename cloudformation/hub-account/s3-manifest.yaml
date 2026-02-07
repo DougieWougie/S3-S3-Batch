@@ -1,0 +1,88 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Encrypted S3 manifest bucket with lifecycle management for S3-to-S3 transfer.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+  ManifestBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-manifest-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+            BucketKeyEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireManifests
+            Status: Enabled
+            Prefix: manifests/
+            ExpirationInDays: 7
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+          - Id: ExpireReports
+            Status: Enabled
+            Prefix: reports/
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Purpose
+          Value: S3TransferManifests
+
+  ManifestBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ManifestBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ManifestBucket.Arn
+              - !Sub '${ManifestBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: DenyUnencryptedPut
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${ManifestBucket.Arn}/*'
+            Condition:
+              'Null':
+                s3:x-amz-server-side-encryption: 'true'
+
+Outputs:
+  ManifestBucketName:
+    Description: Name of the manifest S3 bucket
+    Value: !Ref ManifestBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ManifestBucketName'
+  ManifestBucketArn:
+    Description: ARN of the manifest S3 bucket
+    Value: !GetAtt ManifestBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ManifestBucketArn'

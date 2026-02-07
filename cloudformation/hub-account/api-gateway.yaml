@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  REST API Gateway with AWS_IAM auth for triggering S3-to-S3 transfers.
+
+Parameters:
+  StateMachineArn:
+    Type: String
+    Description: ARN of the Step Functions state machine
+  ApiGatewayRoleArn:
+    Type: String
+    Description: ARN of the API Gateway IAM role
+  StageName:
+    Type: String
+    Default: v1
+    AllowedPattern: '[a-zA-Z0-9]+'
+
+Resources:
+  TransferApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${AWS::StackName}-TransferAPI'
+      Description: API for triggering S3-to-S3 cross-account transfers
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Policy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: execute-api:Invoke
+            Resource: !Sub 'execute-api:/*'
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref AWS::AccountId
+
+  TransferResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref TransferApi
+      ParentId: !GetAtt TransferApi.RootResourceId
+      PathPart: transfer
+
+  StartTransferMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref TransferApi
+      ResourceId: !Ref TransferResource
+      HttpMethod: POST
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:states:action/StartExecution'
+        Credentials: !Ref ApiGatewayRoleArn
+        RequestTemplates:
+          application/json: !Sub |
+            {
+              "stateMachineArn": "${StateMachineArn}",
+              "input": "$util.escapeJavaScript($input.body)"
+            }
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseTemplates:
+              application/json: |
+                {
+                  "executionArn": "$input.json('$.executionArn')",
+                  "startDate": "$input.json('$.startDate')"
+                }
+          - StatusCode: '400'
+            SelectionPattern: '4\d{2}'
+          - StatusCode: '500'
+            SelectionPattern: '5\d{2}'
+      MethodResponses:
+        - StatusCode: '200'
+        - StatusCode: '400'
+        - StatusCode: '500'
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: StartTransferMethod
+    Properties:
+      RestApiId: !Ref TransferApi
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref TransferApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref StageName
+      MethodSettings:
+        - ResourcePath: /*
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${TransferApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/transfer'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
+  ApiId:
+    Description: API Gateway REST API ID
+    Value: !Ref TransferApi

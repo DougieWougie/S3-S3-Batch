@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS Service Catalog portfolio and product for S3-to-S3 cross-account batch transfer.
+
+Parameters:
+  PortfolioOwner:
+    Type: String
+    Description: Owner of the Service Catalog portfolio
+    Default: Platform Engineering
+  PortfolioDescription:
+    Type: String
+    Default: Data transfer products for cross-account S3 operations
+  ProductVersion:
+    Type: String
+    Default: '1.0.0'
+  TemplateBucket:
+    Type: String
+    Description: S3 bucket containing the main CloudFormation template
+  TemplateKey:
+    Type: String
+    Description: S3 key for the main.yaml template
+    Default: cloudformation/hub-account/main.yaml
+  PrincipalArn:
+    Type: String
+    Description: ARN of the IAM principal (user/role/group) to grant portfolio access
+  LaunchRoleArn:
+    Type: String
+    Description: ARN of the IAM role Service Catalog uses to launch the product
+
+Resources:
+  TransferPortfolio:
+    Type: AWS::ServiceCatalog::Portfolio
+    Properties:
+      DisplayName: Data Transfer Products
+      Description: !Ref PortfolioDescription
+      ProviderName: !Ref PortfolioOwner
+      Tags:
+        - Key: ManagedBy
+          Value: ServiceCatalog
+
+  S3TransferProduct:
+    Type: AWS::ServiceCatalog::CloudFormationProduct
+    Properties:
+      Name: S3-to-S3 Cross-Account Batch Transfer
+      Description: >
+        Automated S3-to-S3 cross-account file transfer using Step Functions and Lambda.
+        Supports scheduled, event-driven, and API-triggered transfers with KMS encryption,
+        validation, and monitoring.
+      Owner: !Ref PortfolioOwner
+      Distributor: !Ref PortfolioOwner
+      SupportDescription: Contact Platform Engineering for support
+      SupportUrl: https://wiki.internal/s3-transfer
+      ProvisioningArtifactParameters:
+        - Name: !Sub 'v${ProductVersion}'
+          Description: !Sub 'Version ${ProductVersion} of S3-to-S3 cross-account transfer'
+          Info:
+            LoadTemplateFromURL: !Sub 'https://${TemplateBucket}.s3.amazonaws.com/${TemplateKey}'
+          Type: CLOUD_FORMATION_TEMPLATE
+      Tags:
+        - Key: ProductType
+          Value: DataTransfer
+
+  PortfolioProductAssociation:
+    Type: AWS::ServiceCatalog::PortfolioProductAssociation
+    Properties:
+      PortfolioId: !Ref TransferPortfolio
+      ProductId: !Ref S3TransferProduct
+
+  PortfolioPrincipalAssociation:
+    Type: AWS::ServiceCatalog::PortfolioPrincipalAssociation
+    Properties:
+      PortfolioId: !Ref TransferPortfolio
+      PrincipalARN: !Ref PrincipalArn
+      PrincipalType: IAM
+
+  LaunchConstraint:
+    Type: AWS::ServiceCatalog::LaunchRoleConstraint
+    DependsOn: PortfolioProductAssociation
+    Properties:
+      PortfolioId: !Ref TransferPortfolio
+      ProductId: !Ref S3TransferProduct
+      RoleArn: !Ref LaunchRoleArn
+      Description: Launch constraint for S3 transfer product
+
+Outputs:
+  PortfolioId:
+    Description: Service Catalog portfolio ID
+    Value: !Ref TransferPortfolio
+  ProductId:
+    Description: Service Catalog product ID
+    Value: !Ref S3TransferProduct

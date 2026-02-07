@@ -1,0 +1,124 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cross-account access for S3-to-S3 transfer - Source Account.
+  Creates a reader role, updates bucket policy, and adds KMS key policy statement.
+
+Parameters:
+  HubAccountId:
+    Type: String
+    Description: AWS Account ID of the hub account
+    AllowedPattern: '^\d{12}$'
+  DestinationRoleArn:
+    Type: String
+    Description: ARN of the destination account writer role (granted read access to source)
+  SourceBucketName:
+    Type: String
+    Description: Name of the source S3 bucket
+  SourceKmsKeyArn:
+    Type: String
+    Description: ARN of the source KMS CMK
+  ExternalId:
+    Type: String
+    Description: External ID for STS AssumeRole (confused deputy protection)
+    Default: ''
+  LambdaExecutionRoleArn:
+    Type: String
+    Description: ARN of the Lambda execution role in the hub account
+
+Conditions:
+  HasExternalId: !Not [!Equals [!Ref ExternalId, '']]
+
+Resources:
+  # Source Reader Role - assumed by Lambda in hub account for listing objects
+  SourceReaderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-SourceReaderRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref LambdaExecutionRoleArn
+            Action: sts:AssumeRole
+            Condition: !If
+              - HasExternalId
+              - StringEquals:
+                  sts:ExternalId: !Ref ExternalId
+              - !Ref AWS::NoValue
+      Policies:
+        - PolicyName: ReadSourceBucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Sub 'arn:aws:s3:::${SourceBucketName}'
+                  - !Sub 'arn:aws:s3:::${SourceBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !Ref SourceKmsKeyArn
+
+  # Bucket Policy granting destination role read access to source bucket
+  SourceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SourceBucketName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowDestRoleRead
+            Effect: Allow
+            Principal:
+              AWS: !Ref DestinationRoleArn
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource: !Sub 'arn:aws:s3:::${SourceBucketName}/*'
+          - Sid: AllowDestRoleListBucket
+            Effect: Allow
+            Principal:
+              AWS: !Ref DestinationRoleArn
+            Action: s3:ListBucket
+            Resource: !Sub 'arn:aws:s3:::${SourceBucketName}'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:aws:s3:::${SourceBucketName}'
+              - !Sub 'arn:aws:s3:::${SourceBucketName}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+Outputs:
+  SourceReaderRoleArn:
+    Description: ARN of the source reader role
+    Value: !GetAtt SourceReaderRole.Arn
+  SourceBucketName:
+    Description: Source bucket name
+    Value: !Ref SourceBucketName
+  KmsKeyPolicyStatement:
+    Description: >
+      Add this statement to your source KMS key policy to grant the destination role
+      decrypt access. This must be added manually to the existing key policy.
+    Value: !Sub |
+      {
+        "Sid": "AllowDestRoleDecrypt",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "${DestinationRoleArn}"
+        },
+        "Action": [
+          "kms:Decrypt",
+          "kms:DescribeKey"
+        ],
+        "Resource": "*"
+      }

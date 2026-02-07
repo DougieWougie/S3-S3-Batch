@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cross-account access for S3-to-S3 transfer - Destination Account.
+  Creates a writer role with s3:PutObject on dest + s3:GetObject on source + KMS encrypt/decrypt.
+
+Parameters:
+  HubAccountId:
+    Type: String
+    Description: AWS Account ID of the hub account
+    AllowedPattern: '^\d{12}$'
+  SourceBucketName:
+    Type: String
+    Description: Name of the source S3 bucket (in source account)
+  DestinationBucketName:
+    Type: String
+    Description: Name of the destination S3 bucket
+  SourceKmsKeyArn:
+    Type: String
+    Description: ARN of the source KMS CMK (for decryption)
+  DestinationKmsKeyArn:
+    Type: String
+    Description: ARN of the destination KMS CMK (for encryption)
+  ExternalId:
+    Type: String
+    Description: External ID for STS AssumeRole (confused deputy protection)
+    Default: ''
+  LambdaExecutionRoleArn:
+    Type: String
+    Description: ARN of the Lambda execution role in the hub account
+
+Conditions:
+  HasExternalId: !Not [!Equals [!Ref ExternalId, '']]
+
+Resources:
+  # Destination Writer Role - assumed by Lambda for server-side copy
+  DestinationWriterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-DestWriterRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref LambdaExecutionRoleArn
+            Action: sts:AssumeRole
+            Condition: !If
+              - HasExternalId
+              - StringEquals:
+                  sts:ExternalId: !Ref ExternalId
+              - !Ref AWS::NoValue
+      Policies:
+        # Read from source bucket (server-side copy reads from source)
+        - PolicyName: ReadSourceBucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub 'arn:aws:s3:::${SourceBucketName}/*'
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${SourceBucketName}'
+        # Write to destination bucket
+        - PolicyName: WriteDestinationBucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                  - s3:ListBucketMultipartUploads
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DestinationBucketName}'
+                  - !Sub 'arn:aws:s3:::${DestinationBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DestinationBucketName}'
+                  - !Sub 'arn:aws:s3:::${DestinationBucketName}/*'
+        # KMS: Decrypt source + Encrypt destination
+        - PolicyName: KmsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DecryptSource
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !Ref SourceKmsKeyArn
+              - Sid: EncryptDestination
+                Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:DescribeKey
+                Resource: !Ref DestinationKmsKeyArn
+
+  # Destination bucket policy
+  DestinationBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DestinationBucketName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:aws:s3:::${DestinationBucketName}'
+              - !Sub 'arn:aws:s3:::${DestinationBucketName}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+Outputs:
+  DestinationWriterRoleArn:
+    Description: ARN of the destination writer role
+    Value: !GetAtt DestinationWriterRole.Arn
+  DestinationBucketName:
+    Description: Destination bucket name
+    Value: !Ref DestinationBucketName
+  KmsKeyPolicyStatement:
+    Description: >
+      Add this statement to your destination KMS key policy to grant the writer role
+      encrypt access. This must be added manually to the existing key policy.
+    Value: !Sub |
+      {
+        "Sid": "AllowDestWriterRoleEncrypt",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "${DestinationWriterRole.Arn}"
+        },
+        "Action": [
+          "kms:Encrypt",
+          "kms:GenerateDataKey",
+          "kms:DescribeKey"
+        ],
+        "Resource": "*"
+      }

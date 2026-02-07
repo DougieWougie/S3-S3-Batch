@@ -1,0 +1,221 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Lambda functions for S3-to-S3 cross-account transfer.
+
+Parameters:
+  LambdaExecutionRoleArn:
+    Type: String
+    Description: ARN of the Lambda execution role
+  SourceRoleArn:
+    Type: String
+    Description: ARN of the source account reader role
+  DestinationRoleArn:
+    Type: String
+    Description: ARN of the destination account writer role
+  ExternalId:
+    Type: String
+    Description: External ID for STS AssumeRole
+    Default: ''
+  SourceBucket:
+    Type: String
+    Description: Source S3 bucket name
+  DestinationBucket:
+    Type: String
+    Description: Destination S3 bucket name
+  SourcePrefix:
+    Type: String
+    Description: Source prefix filter
+    Default: ''
+  DestinationPrefix:
+    Type: String
+    Description: Destination prefix
+    Default: ''
+  ManifestBucket:
+    Type: String
+    Description: Manifest S3 bucket name
+  SourceKmsKeyId:
+    Type: String
+    Description: Source KMS key ARN
+  DestinationKmsKeyId:
+    Type: String
+    Description: Destination KMS key ARN
+  SnsTopicArn:
+    Type: String
+    Description: SNS topic ARN for notifications
+    Default: ''
+  LambdaCodeBucket:
+    Type: String
+    Description: S3 bucket containing Lambda deployment packages
+  LambdaCodePrefix:
+    Type: String
+    Description: S3 key prefix for Lambda deployment packages
+    Default: lambda/
+  TransferConcurrencyLimit:
+    Type: Number
+    Description: Reserved concurrent executions for TransferObject Lambda
+    Default: 50
+    MinValue: 1
+    MaxValue: 1000
+
+Resources:
+  # Common Lambda Layer
+  CommonLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub '${AWS::StackName}-common'
+      Description: Common utilities for S3 transfer functions
+      Content:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub '${LambdaCodePrefix}common-layer.zip'
+      CompatibleRuntimes:
+        - python3.12
+      CompatibleArchitectures:
+        - x86_64
+
+  # ListObjects Lambda
+  ListObjectsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-ListObjects'
+      Runtime: python3.12
+      Handler: list_objects.handler.handler
+      Role: !Ref LambdaExecutionRoleArn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub '${LambdaCodePrefix}list-objects.zip'
+      Layers:
+        - !Ref CommonLayer
+      MemorySize: 512
+      Timeout: 900
+      ReservedConcurrentExecutions: 1
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          SOURCE_ROLE_ARN: !Ref SourceRoleArn
+          DESTINATION_ROLE_ARN: !Ref DestinationRoleArn
+          EXTERNAL_ID: !Ref ExternalId
+          SOURCE_BUCKET: !Ref SourceBucket
+          DESTINATION_BUCKET: !Ref DestinationBucket
+          SOURCE_PREFIX: !Ref SourcePrefix
+          DESTINATION_PREFIX: !Ref DestinationPrefix
+          MANIFEST_BUCKET: !Ref ManifestBucket
+          SOURCE_KMS_KEY_ID: !Ref SourceKmsKeyId
+          DESTINATION_KMS_KEY_ID: !Ref DestinationKmsKeyId
+          LOG_LEVEL: INFO
+
+  # TransferObject Lambda
+  TransferObjectFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-TransferObject'
+      Runtime: python3.12
+      Handler: transfer_object.handler.handler
+      Role: !Ref LambdaExecutionRoleArn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub '${LambdaCodePrefix}transfer-object.zip'
+      Layers:
+        - !Ref CommonLayer
+      MemorySize: 256
+      Timeout: 900
+      ReservedConcurrentExecutions: !Ref TransferConcurrencyLimit
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          SOURCE_ROLE_ARN: !Ref SourceRoleArn
+          DESTINATION_ROLE_ARN: !Ref DestinationRoleArn
+          EXTERNAL_ID: !Ref ExternalId
+          SOURCE_BUCKET: !Ref SourceBucket
+          DESTINATION_BUCKET: !Ref DestinationBucket
+          SOURCE_PREFIX: !Ref SourcePrefix
+          DESTINATION_PREFIX: !Ref DestinationPrefix
+          SOURCE_KMS_KEY_ID: !Ref SourceKmsKeyId
+          DESTINATION_KMS_KEY_ID: !Ref DestinationKmsKeyId
+          LOG_LEVEL: INFO
+
+  # ValidateTransfer Lambda
+  ValidateTransferFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-ValidateTransfer'
+      Runtime: python3.12
+      Handler: validate_transfer.handler.handler
+      Role: !Ref LambdaExecutionRoleArn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub '${LambdaCodePrefix}validate-transfer.zip'
+      Layers:
+        - !Ref CommonLayer
+      MemorySize: 512
+      Timeout: 900
+      ReservedConcurrentExecutions: 1
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          SOURCE_ROLE_ARN: !Ref SourceRoleArn
+          DESTINATION_ROLE_ARN: !Ref DestinationRoleArn
+          EXTERNAL_ID: !Ref ExternalId
+          SOURCE_BUCKET: !Ref SourceBucket
+          DESTINATION_BUCKET: !Ref DestinationBucket
+          MANIFEST_BUCKET: !Ref ManifestBucket
+          DESTINATION_PREFIX: !Ref DestinationPrefix
+          SOURCE_KMS_KEY_ID: !Ref SourceKmsKeyId
+          DESTINATION_KMS_KEY_ID: !Ref DestinationKmsKeyId
+          VALIDATION_SAMPLE_SIZE: '10'
+          LOG_LEVEL: INFO
+
+  # GenerateReport Lambda
+  GenerateReportFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-GenerateReport'
+      Runtime: python3.12
+      Handler: generate_report.handler.handler
+      Role: !Ref LambdaExecutionRoleArn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Sub '${LambdaCodePrefix}generate-report.zip'
+      Layers:
+        - !Ref CommonLayer
+      MemorySize: 256
+      Timeout: 60
+      ReservedConcurrentExecutions: 1
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          MANIFEST_BUCKET: !Ref ManifestBucket
+          SNS_TOPIC_ARN: !Ref SnsTopicArn
+          DESTINATION_BUCKET: !Ref DestinationBucket
+          DESTINATION_PREFIX: !Ref DestinationPrefix
+          SOURCE_BUCKET: !Ref SourceBucket
+          SOURCE_PREFIX: !Ref SourcePrefix
+          LOG_LEVEL: INFO
+
+Outputs:
+  ListObjectsFunctionArn:
+    Description: ListObjects Lambda ARN
+    Value: !GetAtt ListObjectsFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ListObjectsArn'
+  TransferObjectFunctionArn:
+    Description: TransferObject Lambda ARN
+    Value: !GetAtt TransferObjectFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TransferObjectArn'
+  ValidateTransferFunctionArn:
+    Description: ValidateTransfer Lambda ARN
+    Value: !GetAtt ValidateTransferFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ValidateTransferArn'
+  GenerateReportFunctionArn:
+    Description: GenerateReport Lambda ARN
+    Value: !GetAtt GenerateReportFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-GenerateReportArn'
+  CommonLayerArn:
+    Description: Common Lambda Layer ARN
+    Value: !Ref CommonLayer

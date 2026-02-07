@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Root nested stack for S3-to-S3 Cross-Account Batch Transfer.
+  Orchestrates all hub-account resources.
+
+Parameters:
+  # Cross-Account
+  SourceRoleArn:
+    Type: String
+    Description: ARN of the cross-account role in the source account
+  DestinationRoleArn:
+    Type: String
+    Description: ARN of the cross-account role in the destination account
+  ExternalId:
+    Type: String
+    Description: External ID for STS AssumeRole (confused deputy protection)
+    Default: ''
+
+  # S3 Configuration
+  SourceBucket:
+    Type: String
+    Description: Source S3 bucket name
+  DestinationBucket:
+    Type: String
+    Description: Destination S3 bucket name
+  SourcePrefix:
+    Type: String
+    Description: Source prefix filter
+    Default: ''
+  DestinationPrefix:
+    Type: String
+    Description: Destination prefix
+    Default: ''
+
+  # KMS
+  SourceKmsKeyId:
+    Type: String
+    Description: Source KMS CMK ARN
+  DestinationKmsKeyId:
+    Type: String
+    Description: Destination KMS CMK ARN
+
+  # Lambda Deployment
+  LambdaCodeBucket:
+    Type: String
+    Description: S3 bucket containing Lambda deployment packages
+  LambdaCodePrefix:
+    Type: String
+    Description: S3 key prefix for Lambda packages
+    Default: lambda/
+  TemplateBucket:
+    Type: String
+    Description: S3 bucket containing nested CloudFormation templates
+  TemplatePrefix:
+    Type: String
+    Description: S3 key prefix for CloudFormation templates
+    Default: cloudformation/hub-account/
+
+  # Trigger Configuration
+  EnableSchedule:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  ScheduleExpression:
+    Type: String
+    Default: 'rate(1 day)'
+  EnableS3EventTrigger:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+
+  # Transfer Settings
+  TransferConcurrencyLimit:
+    Type: Number
+    Default: 50
+    MinValue: 1
+    MaxValue: 1000
+
+  # Monitoring
+  NotificationEmail:
+    Type: String
+    Default: ''
+
+  # Environment
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+  # 1. Manifest Bucket
+  ManifestStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.amazonaws.com/${TemplatePrefix}s3-manifest.yaml'
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+
+  # 2. Monitoring (SNS topic needed by IAM and Lambda)
+  MonitoringStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.amazonaws.com/${TemplatePrefix}monitoring.yaml'
+      Parameters:
+        StateMachineName: !Sub '${AWS::StackName}-TransferWorkflow'
+        ListObjectsFunctionName: !Sub '${AWS::StackName}-ListObjects'
+        TransferObjectFunctionName: !Sub '${AWS::StackName}-TransferObject'
+        ValidateTransferFunctionName: !Sub '${AWS::StackName}-ValidateTransfer'
+        GenerateReportFunctionName: !Sub '${AWS::StackName}-GenerateReport'
+        NotificationEmail: !Ref NotificationEmail
+
+  # 3. IAM Roles
+  IamStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - ManifestStack
+      - MonitoringStack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.amazonaws.com/${TemplatePrefix}iam.yaml'
+      Parameters:
+        SourceRoleArn: !Ref SourceRoleArn
+        DestinationRoleArn: !Ref DestinationRoleArn
+        ManifestBucketArn: !GetAtt ManifestStack.Outputs.ManifestBucketArn
+        SnsTopicArn: !GetAtt MonitoringStack.Outputs.SnsTopicArn
+
+  # 4. Lambda Functions
+  LambdaStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: IamStack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.amazonaws.com/${TemplatePrefix}lambda.yaml'
+      Parameters:
+        LambdaExecutionRoleArn: !GetAtt IamStack.Outputs.LambdaExecutionRoleArn
+        SourceRoleArn: !Ref SourceRoleArn
+        DestinationRoleArn: !Ref DestinationRoleArn
+        ExternalId: !Ref ExternalId
+        SourceBucket: !Ref SourceBucket
+        DestinationBucket: !Ref DestinationBucket
+        SourcePrefix: !Ref SourcePrefix
+        DestinationPrefix: !Ref DestinationPrefix
+        ManifestBucket: !GetAtt ManifestStack.Outputs.ManifestBucketName
+        SourceKmsKeyId: !Ref SourceKmsKeyId
+        DestinationKmsKeyId: !Ref DestinationKmsKeyId
+        SnsTopicArn: !GetAtt MonitoringStack.Outputs.SnsTopicArn
+        LambdaCodeBucket: !Ref LambdaCodeBucket
+        LambdaCodePrefix: !Ref LambdaCodePrefix
+        TransferConcurrencyLimit: !Ref TransferConcurrencyLimit
+
+  # 5. Step Functions
+  StepFunctionsStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: LambdaStack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.amazonaws.com/${TemplatePrefix}stepfunctions.yaml'
+      Parameters:
+        StepFunctionsExecutionRoleArn: !GetAtt IamStack.Outputs.StepFunctionsExecutionRoleArn
+        ListObjectsFunctionArn: !GetAtt LambdaStack.Outputs.ListObjectsFunctionArn
+        TransferObjectFunctionArn: !GetAtt LambdaStack.Outputs.TransferObjectFunctionArn
+        ValidateTransferFunctionArn: !GetAtt LambdaStack.Outputs.ValidateTransferFunctionArn
+        GenerateReportFunctionArn: !GetAtt LambdaStack.Outputs.GenerateReportFunctionArn
+
+  # 6. EventBridge
+  EventBridgeStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: StepFunctionsStack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.amazonaws.com/${TemplatePrefix}eventbridge.yaml'
+      Parameters:
+        StateMachineArn: !GetAtt StepFunctionsStack.Outputs.StateMachineArn
+        EventBridgeRoleArn: !GetAtt IamStack.Outputs.EventBridgeRoleArn
+        EnableSchedule: !Ref EnableSchedule
+        ScheduleExpression: !Ref ScheduleExpression
+        SourcePrefix: !Ref SourcePrefix
+        EnableS3EventTrigger: !Ref EnableS3EventTrigger
+        SourceBucketName: !Ref SourceBucket
+
+  # 7. API Gateway
+  ApiGatewayStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: StepFunctionsStack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.amazonaws.com/${TemplatePrefix}api-gateway.yaml'
+      Parameters:
+        StateMachineArn: !GetAtt StepFunctionsStack.Outputs.StateMachineArn
+        ApiGatewayRoleArn: !GetAtt IamStack.Outputs.ApiGatewayRoleArn
+
+Outputs:
+  StateMachineArn:
+    Description: Transfer workflow state machine ARN
+    Value: !GetAtt StepFunctionsStack.Outputs.StateMachineArn
+  ApiEndpoint:
+    Description: API Gateway transfer endpoint
+    Value: !GetAtt ApiGatewayStack.Outputs.ApiEndpoint
+  ManifestBucketName:
+    Description: Manifest/reports S3 bucket
+    Value: !GetAtt ManifestStack.Outputs.ManifestBucketName
+  SnsTopicArn:
+    Description: Notification SNS topic ARN
+    Value: !GetAtt MonitoringStack.Outputs.SnsTopicArn
+  DashboardUrl:
+    Description: CloudWatch dashboard URL
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}-Dashboard'

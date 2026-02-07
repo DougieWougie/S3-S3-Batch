@@ -1,0 +1,214 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudWatch alarms, dashboard, and SNS topic for S3-to-S3 transfer monitoring.
+
+Parameters:
+  StateMachineName:
+    Type: String
+    Description: Name of the Step Functions state machine
+  ListObjectsFunctionName:
+    Type: String
+    Default: ''
+  TransferObjectFunctionName:
+    Type: String
+    Default: ''
+  ValidateTransferFunctionName:
+    Type: String
+    Default: ''
+  GenerateReportFunctionName:
+    Type: String
+    Default: ''
+  NotificationEmail:
+    Type: String
+    Description: Email address for alarm notifications
+    Default: ''
+
+Conditions:
+  HasEmail: !Not [!Equals [!Ref NotificationEmail, '']]
+
+Resources:
+  # SNS Topic for notifications
+  TransferNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-notifications'
+      KmsMasterKeyId: alias/aws/sns
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      TopicArn: !Ref TransferNotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # Alarms
+  StateMachineFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-SFN-Failed'
+      AlarmDescription: Step Functions execution failed
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${StateMachineName}'
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref TransferNotificationTopic
+
+  StateMachineTimedOutAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-SFN-TimedOut'
+      AlarmDescription: Step Functions execution timed out
+      Namespace: AWS/States
+      MetricName: ExecutionsTimedOut
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${StateMachineName}'
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref TransferNotificationTopic
+
+  TransferLambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-TransferLambda-Errors'
+      AlarmDescription: TransferObject Lambda errors exceeded threshold
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref TransferObjectFunctionName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref TransferNotificationTopic
+
+  TransferLambdaThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-TransferLambda-Throttles'
+      AlarmDescription: TransferObject Lambda throttled
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref TransferObjectFunctionName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref TransferNotificationTopic
+
+  # Dashboard
+  TransferDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${AWS::StackName}-Dashboard'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Step Functions Executions",
+                "metrics": [
+                  ["AWS/States", "ExecutionsStarted", "StateMachineArn", "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${StateMachineName}", {"stat": "Sum"}],
+                  [".", "ExecutionsSucceeded", ".", ".", {"stat": "Sum"}],
+                  [".", "ExecutionsFailed", ".", ".", {"stat": "Sum"}],
+                  [".", "ExecutionsTimedOut", ".", ".", {"stat": "Sum"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Step Functions Duration",
+                "metrics": [
+                  ["AWS/States", "ExecutionTime", "StateMachineArn", "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${StateMachineName}", {"stat": "Average"}],
+                  [".", ".", ".", ".", {"stat": "Maximum"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Invocations",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${TransferObjectFunctionName}", {"stat": "Sum"}],
+                  [".", ".", ".", "${ListObjectsFunctionName}", {"stat": "Sum"}],
+                  [".", ".", ".", "${ValidateTransferFunctionName}", {"stat": "Sum"}],
+                  [".", ".", ".", "${GenerateReportFunctionName}", {"stat": "Sum"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Errors & Throttles",
+                "metrics": [
+                  ["AWS/Lambda", "Errors", "FunctionName", "${TransferObjectFunctionName}", {"stat": "Sum", "color": "#d62728"}],
+                  [".", "Throttles", ".", ".", {"stat": "Sum", "color": "#ff7f0e"}],
+                  [".", "Errors", ".", "${ListObjectsFunctionName}", {"stat": "Sum"}],
+                  [".", "Errors", ".", "${ValidateTransferFunctionName}", {"stat": "Sum"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 12, "width": 24, "height": 6,
+              "properties": {
+                "title": "Lambda Duration (ms)",
+                "metrics": [
+                  ["AWS/Lambda", "Duration", "FunctionName", "${TransferObjectFunctionName}", {"stat": "Average"}],
+                  [".", ".", ".", ".", {"stat": "p99"}],
+                  [".", ".", ".", "${ListObjectsFunctionName}", {"stat": "Average"}],
+                  [".", ".", ".", "${ValidateTransferFunctionName}", {"stat": "Average"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  SnsTopicArn:
+    Description: SNS notification topic ARN
+    Value: !Ref TransferNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-SnsTopicArn'
+  DashboardName:
+    Description: CloudWatch dashboard name
+    Value: !Sub '${AWS::StackName}-Dashboard'

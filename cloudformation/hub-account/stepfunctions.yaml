@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Step Functions state machine for S3-to-S3 cross-account batch transfer.
+
+Parameters:
+  StepFunctionsExecutionRoleArn:
+    Type: String
+    Description: ARN of the Step Functions execution role
+  ListObjectsFunctionArn:
+    Type: String
+    Description: ARN of the ListObjects Lambda function
+  TransferObjectFunctionArn:
+    Type: String
+    Description: ARN of the TransferObject Lambda function
+  ValidateTransferFunctionArn:
+    Type: String
+    Description: ARN of the ValidateTransfer Lambda function
+  GenerateReportFunctionArn:
+    Type: String
+    Description: ARN of the GenerateReport Lambda function
+
+Resources:
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/states/${AWS::StackName}-TransferWorkflow'
+      RetentionInDays: 30
+
+  TransferStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${AWS::StackName}-TransferWorkflow'
+      RoleArn: !Ref StepFunctionsExecutionRoleArn
+      DefinitionS3Location:
+        Bucket: !ImportValue
+          Fn::Sub: '${AWS::StackName}-ManifestBucketName'
+        Key: statemachine/transfer-workflow.asl.json
+      DefinitionSubstitutions:
+        ListObjectsFunctionArn: !Ref ListObjectsFunctionArn
+        TransferObjectFunctionArn: !Ref TransferObjectFunctionArn
+        ValidateTransferFunctionArn: !Ref ValidateTransferFunctionArn
+        GenerateReportFunctionArn: !Ref GenerateReportFunctionArn
+      TracingConfiguration:
+        Enabled: true
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      Tags:
+        - Key: Purpose
+          Value: S3CrossAccountTransfer
+
+Outputs:
+  StateMachineArn:
+    Description: Transfer workflow state machine ARN
+    Value: !GetAtt TransferStateMachine.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineArn'
+  StateMachineName:
+    Description: Transfer workflow state machine name
+    Value: !GetAtt TransferStateMachine.Name
